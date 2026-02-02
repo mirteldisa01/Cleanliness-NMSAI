@@ -51,7 +51,6 @@ def download_video(url):
 # ================= UI =================
 st.title("🧹 Cleanliness Detection")
 
-st.markdown("Enter Video URL(**.mp4 / .webm**)")
 
 video_url = st.text_input(
     "Enter Video URL (.mp4 / .webm)",
