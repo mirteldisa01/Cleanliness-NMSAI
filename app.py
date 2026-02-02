@@ -12,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-MODEL_PATH = "cleanliness-x-100.pt"
+MODEL_PATH = "https://github.com/mirteldisa01/Cleanliness-NMSAI/releases/download/v1.0/cleanliness-x-100.pt"
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 CONF_THRESHOLD = 0.29
 
