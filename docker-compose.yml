@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  cleanliness-app:
+    container_name: cleanliness-detection
+    build: .
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    volumes:
+      - .:/app
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true
