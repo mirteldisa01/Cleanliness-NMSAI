@@ -1,13 +1,7 @@
-version: "3.9"
-
 services:
-  cleanliness-app:
+  cleanliness-api:
     container_name: cleanliness-detection
     build: .
     ports:
-      - "8001:8001"
-    restart: unless-stopped
-    volumes:
-      - .:/app
-    environment:
-      - STREAMLIT_SERVER_HEADLESS=true
+      - "8004:8000"
+    restart: always

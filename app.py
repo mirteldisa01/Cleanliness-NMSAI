@@ -1,27 +1,26 @@
-import streamlit as st
-import cv2
-import requests
-import numpy as np
-import os
-import tempfile
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from ultralytics import YOLO
+import cv2
+import numpy as np
+import requests
+import tempfile
+import os
+import base64
 
 # ================= CONFIG =================
-st.set_page_config(
-    page_title="🧹 Cleanliness Detection",
-    layout="wide"
-)
-
 MODEL_PATH = "https://github.com/mirteldisa01/Cleanliness-NMSAI/releases/download/v1.0/cleanliness-x-100.pt"
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 CONF_THRESHOLD = 0.29
 
-# ================= LOAD MODEL =================
-@st.cache_resource
-def load_model():
-    return YOLO(MODEL_PATH)
+app = FastAPI(title="Cleanliness Detection API")
 
-model = load_model()
+# ================= LOAD MODEL =================
+model = YOLO(MODEL_PATH)
+
+# ================= REQUEST BODY =================
+class VideoRequest(BaseModel):
+    video_url: str
 
 # ================= HELPER =================
 def resize_fit(frame, target_w=1280, target_h=720):
@@ -41,88 +40,90 @@ def resize_fit(frame, target_w=1280, target_h=720):
     return canvas
 
 def download_video(url):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".video")
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     r = requests.get(url, stream=True, timeout=30)
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to download video")
+
     for chunk in r.iter_content(chunk_size=1024 * 1024):
         tmp.write(chunk)
+
     tmp.close()
     return tmp.name
 
-# ================= UI =================
-st.title("🧹 Cleanliness Detection")
+# ================= ENDPOINT =================
+@app.post("/process-video")
+def process_video(data: VideoRequest):
 
+    video_path = download_video(data.video_url)
 
-video_url = st.text_input(
-    "Enter Video URL (.mp4 / .webm)",
-    placeholder="http://example.com/video.webm"
-)
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    os.remove(video_path)
 
-if st.button("Process Video") and video_url:
-    with st.spinner("Processing video..."):
-
-        # ===== Download video =====
-        video_path = download_video(video_url)
-
-        cap = cv2.VideoCapture(video_path)
-        ret, frame = cap.read()
-        cap.release()
-        os.remove(video_path)
-
-        if not ret:
-            st.error("The video cannot be opened. Please make sure the URL is valid and publicly accessible.")
-            st.stop()
-
-        # ===== YOLO Predict =====
-        results = model.predict(
-            frame,
-            conf=CONF_THRESHOLD,
-            nms=False,
-            max_det=300,
-            verbose=False
+    if not ret:
+        raise HTTPException(
+            status_code=400,
+            detail="Video cannot be opened or invalid format"
         )
 
-        boxes = results[0].boxes
-        dirty_detected = False
+    # ===== YOLO Predict =====
+    results = model.predict(
+        frame,
+        conf=CONF_THRESHOLD,
+        nms=False,
+        max_det=300,
+        verbose=False
+    )
 
-        if boxes is not None:
-            for box in boxes:
-                cls_id = int(box.cls[0])
-                cls_name = model.names[cls_id].lower()
-                conf = float(box.conf[0])
+    boxes = results[0].boxes
+    dirty_detected = False
+    detections = []
 
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                is_dirty = cls_name in DIRTY_CLASSES
+    if boxes is not None:
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            cls_name = model.names[cls_id].lower()
+            conf = float(box.conf[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                color = (0, 0, 255) if is_dirty else (0, 255, 0)
+            is_dirty = cls_name in DIRTY_CLASSES
+            color = (0, 0, 255) if is_dirty else (0, 255, 0)
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    frame,
-                    f"{cls_name} {conf:.2f}",
-                    (x1, y2 + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2
-                )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                frame,
+                f"{cls_name} {conf:.2f}",
+                (x1, y2 + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2
+            )
 
-                if is_dirty:
-                    dirty_detected = True
+            detections.append({
+                "class": cls_name,
+                "confidence": conf,
+                "bbox": [x1, y1, x2, y2],
+                "is_dirty": is_dirty
+            })
 
-        status = "Dirty" if dirty_detected else "Clean"
+            if is_dirty:
+                dirty_detected = True
 
-        frame = resize_fit(frame)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    status = "Dirty" if dirty_detected else "Clean"
 
-    # ================= OUTPUT (SS2 STYLE) =================
-    st.subheader(f"Final Status: {status}")
+    frame = resize_fit(frame)
 
-    if dirty_detected:
-        st.info("Final Status: Area needs to be cleaned.")
-    else:
-        st.info("Final Status: Area is clean.")
+    # Convert image to base64
+    _, buffer = cv2.imencode(".jpg", frame)
+    img_base64 = base64.b64encode(buffer).decode("utf-8")
 
-
-    left, center, right = st.columns([30, 40, 30])
-    with center:
-        st.image(frame, use_container_width=True)
+    return {
+        "status": status,
+        "message": "Area needs cleaning" if dirty_detected else "Area is clean",
+        "detections": detections,
+        "image_base64": img_base64
+    }

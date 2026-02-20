@@ -1,26 +1,47 @@
+# ==============================
+# Base Image
+# ==============================
 FROM python:3.10-slim
 
-# ===== System deps (opencv & ffmpeg) =====
+# ==============================
+# Environment Variables
+# ==============================
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# ==============================
+# System Dependencies (OpenCV)
+# ==============================
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ===== Working directory =====
+# ==============================
+# Working Directory
+# ==============================
 WORKDIR /app
 
-# ===== Copy requirements =====
+# ==============================
+# Install Python Dependencies
+# ==============================
 COPY requirements.txt .
 
-# ===== Install Python deps =====
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# ===== Copy app =====
+# ==============================
+# Copy Application Code
+# ==============================
 COPY . .
 
-# ===== Streamlit config =====
-EXPOSE 8001
+# ==============================
+# Expose FastAPI Port
+# ==============================
+EXPOSE 8004
 
-# ===== Run Streamlit =====
-CMD ["streamlit", "run", "app.py", "--server.port=8001", "--server.address=0.0.0.0"]
+# ==============================
+# Run FastAPI (Uvicorn)
+# ==============================
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8004"]
