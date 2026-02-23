@@ -8,6 +8,7 @@ import tempfile
 import os
 import base64
 import yt_dlp
+import shutil
 
 # ================= CONFIG =================
 MODEL_PATH = "https://github.com/mirteldisa01/Cleanliness-NMSAI/releases/download/v1.0/cleanliness-x-100.pt"
@@ -27,16 +28,13 @@ class VideoRequest(BaseModel):
 def resize_fit(frame, target_w=1280, target_h=720):
     h, w = frame.shape[:2]
     scale = min(target_w / w, target_h / h)
-
-    new_w = int(w * scale)
-    new_h = int(h * scale)
+    new_w, new_h = int(w * scale), int(h * scale)
 
     resized = cv2.resize(frame, (new_w, new_h))
     canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
     x_offset = (target_w - new_w) // 2
     y_offset = (target_h - new_h) // 2
-
     canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
     return canvas
 
@@ -46,7 +44,7 @@ def download_direct_video(url):
     r = requests.get(url, stream=True, timeout=60)
 
     if r.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to download video")
+        raise HTTPException(400, "Failed to download video")
 
     for chunk in r.iter_content(chunk_size=1024 * 1024):
         if chunk:
@@ -65,17 +63,19 @@ def download_youtube_video(url):
         "outtmpl": output_path,
         "merge_output_format": "mp4",
         "quiet": True,
-        "noplaylist": True
+        "noplaylist": True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(400, f"YouTube download failed: {e}")
 
-    if not os.path.exists(output_path) or os.path.getsize(output_path) < 100000:
-        raise HTTPException(status_code=400, detail="Downloaded video invalid")
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 100_000:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(400, "Downloaded YouTube video is invalid")
 
     return output_path
 
@@ -83,32 +83,28 @@ def download_youtube_video(url):
 def download_video(url):
     if "youtube.com" in url or "youtu.be" in url:
         return download_youtube_video(url)
-    else:
-        return download_direct_video(url)
-
+    return download_direct_video(url)
 
 # ================= ENDPOINT =================
 @app.post("/process-video")
 def process_video(data: VideoRequest):
-
     video_path = download_video(data.video_url)
-    print("Downloaded file:", video_path)
-    print("Exists:", os.path.exists(video_path))
-    print("Size:", os.path.getsize(video_path))
 
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        os.remove(video_path)
+        raise HTTPException(400, "OpenCV cannot open video")
+
     ret, frame = cap.read()
     cap.release()
 
-    # Hapus file sementara
+    if not ret:
+        os.remove(video_path)
+        raise HTTPException(400, "Failed to read first frame")
+
+    # Cleanup video
     if os.path.exists(video_path):
         os.remove(video_path)
-
-    if not ret:
-        raise HTTPException(
-            status_code=400,
-            detail="Video cannot be opened or invalid format"
-        )
 
     # ===== YOLO Predict =====
     results = model.predict(
@@ -137,7 +133,7 @@ def process_video(data: VideoRequest):
             cv2.putText(
                 frame,
                 f"{cls_name} {conf:.2f}",
-                (x1, y2 + 20),
+                (x1, max(20, y1 - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 color,
@@ -155,10 +151,8 @@ def process_video(data: VideoRequest):
                 dirty_detected = True
 
     status = "Dirty" if dirty_detected else "Clean"
-
     frame = resize_fit(frame)
 
-    # Convert image to base64
     _, buffer = cv2.imencode(".jpg", frame)
     img_base64 = base64.b64encode(buffer).decode("utf-8")
 
