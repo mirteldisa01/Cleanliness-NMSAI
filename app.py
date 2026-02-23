@@ -57,24 +57,27 @@ def download_direct_video(url):
 
 
 def download_youtube_video(url):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp.close()
+    tmp_dir = tempfile.mkdtemp()
+    output_path = os.path.join(tmp_dir, "video.mp4")
 
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
-        'merge_output_format': 'mp4',
-        'outtmpl': tmp.name,
-        'quiet': True,
-        'noplaylist': True
+        "format": "mp4",
+        "outtmpl": output_path,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "noplaylist": True
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download YouTube video: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return tmp.name
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 100000:
+        raise HTTPException(status_code=400, detail="Downloaded video invalid")
+
+    return output_path
 
 
 def download_video(url):
@@ -92,7 +95,7 @@ def process_video(data: VideoRequest):
     print("Downloaded file:", video_path)
     print("Exists:", os.path.exists(video_path))
     print("Size:", os.path.getsize(video_path))
-    
+
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
     cap.release()
