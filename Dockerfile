@@ -44,4 +44,4 @@ EXPOSE 8004
 # ==============================
 # Run FastAPI (Uvicorn)
 # ==============================
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8004"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
