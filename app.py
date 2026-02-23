@@ -89,7 +89,10 @@ def download_video(url):
 def process_video(data: VideoRequest):
 
     video_path = download_video(data.video_url)
-
+    print("Downloaded file:", video_path)
+    print("Exists:", os.path.exists(video_path))
+    print("Size:", os.path.getsize(video_path))
+    
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
     cap.release()
