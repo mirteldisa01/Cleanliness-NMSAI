@@ -7,6 +7,7 @@ import requests
 import tempfile
 import os
 import base64
+import yt_dlp
 
 # ================= CONFIG =================
 MODEL_PATH = "https://github.com/mirteldisa01/Cleanliness-NMSAI/releases/download/v1.0/cleanliness-x-100.pt"
@@ -39,18 +40,48 @@ def resize_fit(frame, target_w=1280, target_h=720):
     canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
     return canvas
 
-def download_video(url):
+
+def download_direct_video(url):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    r = requests.get(url, stream=True, timeout=30)
+    r = requests.get(url, stream=True, timeout=60)
 
     if r.status_code != 200:
         raise HTTPException(status_code=400, detail="Failed to download video")
 
     for chunk in r.iter_content(chunk_size=1024 * 1024):
-        tmp.write(chunk)
+        if chunk:
+            tmp.write(chunk)
 
     tmp.close()
     return tmp.name
+
+
+def download_youtube_video(url):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.close()
+
+    ydl_opts = {
+        'format': 'mp4',
+        'outtmpl': tmp.name,
+        'quiet': True,
+        'noplaylist': True
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to download YouTube video")
+
+    return tmp.name
+
+
+def download_video(url):
+    if "youtube.com" in url or "youtu.be" in url:
+        return download_youtube_video(url)
+    else:
+        return download_direct_video(url)
+
 
 # ================= ENDPOINT =================
 @app.post("/process-video")
@@ -61,7 +92,10 @@ def process_video(data: VideoRequest):
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
     cap.release()
-    os.remove(video_path)
+
+    # Hapus file sementara
+    if os.path.exists(video_path):
+        os.remove(video_path)
 
     if not ret:
         raise HTTPException(
