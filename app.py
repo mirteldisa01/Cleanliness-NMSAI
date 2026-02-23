@@ -61,7 +61,8 @@ def download_youtube_video(url):
     tmp.close()
 
     ydl_opts = {
-        'format': 'mp4',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
+        'merge_output_format': 'mp4',
         'outtmpl': tmp.name,
         'quiet': True,
         'noplaylist': True
@@ -70,8 +71,8 @@ def download_youtube_video(url):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to download YouTube video")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download YouTube video: {str(e)}")
 
     return tmp.name
 
