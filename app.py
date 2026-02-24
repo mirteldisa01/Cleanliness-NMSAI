@@ -9,6 +9,7 @@ import os
 import base64
 import yt_dlp
 import shutil
+import subprocess
 
 # ================= CONFIG =================
 MODEL_PATH = "https://github.com/mirteldisa01/Cleanliness-NMSAI/releases/download/v1.0/cleanliness-x-100.pt"
@@ -25,6 +26,7 @@ class VideoRequest(BaseModel):
     video_url: str
 
 # ================= HELPER =================
+
 def resize_fit(frame, target_w=1280, target_h=720):
     h, w = frame.shape[:2]
     scale = min(target_w / w, target_h / h)
@@ -59,7 +61,7 @@ def download_youtube_video(url):
     output_path = os.path.join(tmp_dir, "video.mp4")
 
     ydl_opts = {
-        "format": "mp4",
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": output_path,
         "merge_output_format": "mp4",
         "quiet": True,
@@ -85,26 +87,56 @@ def download_video(url):
         return download_youtube_video(url)
     return download_direct_video(url)
 
+
+# FORCE CONVERT TO H264 (OpenCV SAFE)
+def convert_to_mp4(input_path):
+    output_path = input_path + "_fixed.mp4"
+
+    command = [
+        "ffmpeg",
+        "-i", input_path,
+        "-vcodec", "libx264",
+        "-acodec", "aac",
+        "-movflags", "+faststart",
+        "-y",
+        output_path
+    ]
+
+    subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 100_000:
+        raise HTTPException(400, "FFmpeg conversion failed")
+
+    return output_path
+
+
 # ================= ENDPOINT =================
 @app.post("/process-video")
 def process_video(data: VideoRequest):
-    video_path = download_video(data.video_url)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        os.remove(video_path)
-        raise HTTPException(400, "OpenCV cannot open video")
+    original_path = download_video(data.video_url)
 
-    ret, frame = cap.read()
-    cap.release()
+    try:
+        fixed_path = convert_to_mp4(original_path)
 
-    if not ret:
-        os.remove(video_path)
-        raise HTTPException(400, "Failed to read first frame")
+        cap = cv2.VideoCapture(fixed_path)
+        if not cap.isOpened():
+            raise HTTPException(400, "OpenCV cannot open converted video")
 
-    # Cleanup video
-    if os.path.exists(video_path):
-        os.remove(video_path)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            raise HTTPException(400, "Failed to read first frame")
+
+    finally:
+        # cleanup original
+        if os.path.exists(original_path):
+            os.remove(original_path)
 
     # ===== YOLO Predict =====
     results = model.predict(
@@ -149,6 +181,10 @@ def process_video(data: VideoRequest):
 
             if is_dirty:
                 dirty_detected = True
+
+    # cleanup converted file
+    if os.path.exists(fixed_path):
+        os.remove(fixed_path)
 
     status = "Dirty" if dirty_detected else "Clean"
     frame = resize_fit(frame)
