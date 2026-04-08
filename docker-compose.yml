@@ -1,0 +1,7 @@
+services:
+  cleanliness-api:
+    container_name: cleanliness-nmsai-api
+    build: .
+    ports:
+      - "8003:8000"
+    restart: always
