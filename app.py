@@ -14,8 +14,8 @@ import threading
 import time
 
 # ================== CONFIG ==================
-MODEL_PATH = "cleanliness-11m-100.pt"
-MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download/v1.1.0/cleanliness-11m-100.pt"
+MODEL_PATH = "cleanliness-11x-100.pt"
+MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download/v1.2.0/cleanliness-11x-100.pt"
 
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 CONF_THRESHOLD = 0.29

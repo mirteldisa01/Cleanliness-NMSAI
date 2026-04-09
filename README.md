@@ -44,8 +44,8 @@ The service is built with FastAPI and designed for scalable backend deployment.
 
 The production model is distributed via GitHub Release.
 
-Version: `v1.1.0`  
-Model File: `cleanliness-11m-100.pt`
+Version: `v1.2.0`  
+Model File: `cleanliness-11x-100.pt`
 
 The application automatically downloads the model at startup if it is not present locally.
 
@@ -197,6 +197,13 @@ Model upgrade release including:
 - Maintained compatibility with the existing inference pipeline
 - No changes to API behavior or deployment workflow
 
+### v1.2.0
+Second model upgrade release including:
+
+- Updated cleanliness detection model with a newer production version
+- Further improved detection performance and inference quality
+- Maintained compatibility with the existing inference pipeline
+- No changes to API behavior or deployment workflow
 ---
 
 ## License
