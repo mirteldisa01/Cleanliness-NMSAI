@@ -15,10 +15,10 @@ MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download
 
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 
-BASE_CONF = 0.05
-SMALL_CONF = 0.3
-LARGE_CONF = 0.1
-AREA_THRESHOLD = 0.05
+CONF_THRESHOLD = 0.1   # ✅ SAMA DENGAN COLAB
+MAX_DET = 300
+FRAME_SKIP = 90
+FPS = 30
 
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
@@ -79,6 +79,7 @@ def cluster_to_two_boxes(boxes):
         return (x1, y1, x2, y2, conf)
 
     result = []
+
     for g in [group1, group2]:
         m = merge(g)
         if m:
@@ -86,7 +87,7 @@ def cluster_to_two_boxes(boxes):
 
     return result
 
-# ================= VIDEO =================
+# ================= VIDEO HANDLER =================
 def save_uploaded_video(file: UploadFile):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     path = tmp.name
@@ -101,6 +102,21 @@ def save_uploaded_video(file: UploadFile):
     file.file.close()
     return path
 
+def download_video_from_url(url: str):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    path = tmp.name
+
+    r = requests.get(url, stream=True)
+    if r.status_code != 200:
+        raise HTTPException(400, "Failed to download video")
+
+    for chunk in r.iter_content(chunk_size=1024 * 1024):
+        if chunk:
+            tmp.write(chunk)
+
+    tmp.close()
+    return path
+
 def convert_to_mp4(input_path):
     output = input_path + "_fixed.mp4"
 
@@ -112,41 +128,65 @@ def convert_to_mp4(input_path):
 
     return output
 
+# ================= FRAME EXTRACTION (IDENTIK COLAB) =================
 def process_frame(video_path):
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+    tmp.close()
 
-    if not ret:
-        raise HTTPException(400, "No frame")
+    t = FRAME_SKIP / float(FPS)
+
+    cmd = [
+        "ffmpeg",
+        "-ss", str(t),
+        "-i", video_path,
+        "-frames:v", "1",
+        "-q:v", "2",
+        "-y",
+        tmp.name
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    frame = cv2.imread(tmp.name)
+    os.remove(tmp.name)
+
+    if frame is None:
+        raise HTTPException(400, "Failed to extract frame")
 
     return frame
 
 # ================= ENDPOINT =================
 @app.post("/process-video")
-def process_video(video_file: UploadFile = File(...)):
+def process_video(
+    video_file: UploadFile = File(None),
+    video_url: str = Form(None)
+):
+    if not video_file and not video_url:
+        raise HTTPException(400, "Provide video_file or video_url")
 
-    original_path = save_uploaded_video(video_file)
+    if video_file:
+        original_path = save_uploaded_video(video_file)
+    else:
+        original_path = download_video_from_url(video_url)
+
     fixed_path = convert_to_mp4(original_path)
 
     try:
         frame = process_frame(fixed_path)
-        h, w = frame.shape[:2]
-        frame_area = w * h
 
-        # ===== YOLO =====
+        # ===== YOLO (SAMA COLAB) =====
         with model_lock:
             results = model.predict(
                 frame,
-                conf=BASE_CONF,
+                conf=CONF_THRESHOLD,
                 nms=False,
-                max_det=300,
+                max_det=MAX_DET,
                 verbose=False
             )
 
         boxes = results[0].boxes
 
-        # ===== FILTER ADAPTIF 🔥 =====
+        # ===== FILTER DIRTY (IDENTIK COLAB) =====
         filtered_boxes = []
 
         if boxes is not None:
@@ -154,17 +194,8 @@ def process_video(video_file: UploadFile = File(...)):
                 cls_name = model.names[int(box.cls[0])].lower()
                 conf = float(box.conf[0])
 
-                if cls_name not in DIRTY_CLASSES:
-                    continue
-
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-                area = (x2 - x1) * (y2 - y1)
-                ratio = area / frame_area
-
-                threshold = LARGE_CONF if ratio >= AREA_THRESHOLD else SMALL_CONF
-
-                if conf >= threshold:
+                if cls_name in DIRTY_CLASSES and conf >= CONF_THRESHOLD:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
                     filtered_boxes.append((x1, y1, x2, y2, conf))
 
         # ===== CLUSTER =====
@@ -207,6 +238,7 @@ def process_video(video_file: UploadFile = File(...)):
             3
         )
 
+        # ===== OUTPUT =====
         frame = resize_fit(frame)
         _, buffer = cv2.imencode(".jpg", frame)
         img_base64 = base64.b64encode(buffer).decode("utf-8")
