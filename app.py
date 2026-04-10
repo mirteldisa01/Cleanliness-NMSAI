@@ -8,346 +8,204 @@ import os
 import base64
 import subprocess
 import threading
-import time
-from urllib.parse import urlparse
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 MODEL_PATH = "cleanliness-11x-100.pt"
 MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download/v1.2.0/cleanliness-11x-100.pt"
 
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
-CONF_THRESHOLD = 0.29
 
-MAX_VIDEO_SECONDS = 10     # Max processing duration (CPU protection)
-MAX_FRAMES = 10            # Hard frame cap (we only process first frames)
+BASE_CONF = 0.05
+SMALL_CONF = 0.3
+LARGE_CONF = 0.1
+AREA_THRESHOLD = 0.05
+
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
 
-ALLOWED_VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg"
-}
-
 app = FastAPI(title="Cleanliness Detection API")
 
-# ================= GLOBAL MODEL =================
 model = None
-model_lock = threading.Lock()   # Thread-safe inference lock
-
+model_lock = threading.Lock()
 
 # ================= STARTUP =================
 @app.on_event("startup")
 def load_model_once():
-    """
-    Load model once when FastAPI starts.
-    Prevents reloading model per request.
-    """
     global model
 
     if not os.path.exists(MODEL_PATH):
-        print("Downloading model...")
         import urllib.request
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
 
     model = YOLO(MODEL_PATH)
-    print("Model loaded successfully")
+    print("Model loaded")
 
-
-# ================= RESIZE HELPER =================
-def resize_fit(frame, target_w=TARGET_WIDTH, target_h=TARGET_HEIGHT):
+# ================= RESIZE =================
+def resize_fit(frame):
     h, w = frame.shape[:2]
-    scale = min(target_w / w, target_h / h)
+    scale = min(TARGET_WIDTH / w, TARGET_HEIGHT / h)
+
     new_w, new_h = int(w * scale), int(h * scale)
-
     resized = cv2.resize(frame, (new_w, new_h))
-    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
 
-    x_offset = (target_w - new_w) // 2
-    y_offset = (target_h - new_h) // 2
-    canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
+    canvas = np.zeros((TARGET_HEIGHT, TARGET_WIDTH, 3), dtype=np.uint8)
+    x_offset = (TARGET_WIDTH - new_w) // 2
+    y_offset = (TARGET_HEIGHT - new_h) // 2
 
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
     return canvas
 
+# ================= CLUSTER =================
+def cluster_to_two_boxes(boxes):
+    if len(boxes) == 0:
+        return []
 
-# ================= URL / FILE VALIDATION =================
-def is_youtube_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        host = parsed.netloc.lower()
-        return "youtube.com" in host or "youtu.be" in host
-    except Exception:
-        return False
+    centers = [(b[0] + b[2]) // 2 for b in boxes]
+    threshold = np.median(centers)
 
+    group1 = [boxes[i] for i in range(len(boxes)) if centers[i] < threshold]
+    group2 = [boxes[i] for i in range(len(boxes)) if centers[i] >= threshold]
 
-def has_valid_video_extension(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-        return any(path.endswith(ext) for ext in ALLOWED_VIDEO_EXTENSIONS)
-    except Exception:
-        return False
+    def merge(group):
+        if len(group) == 0:
+            return None
 
+        x1 = min(b[0] for b in group)
+        y1 = min(b[1] for b in group)
+        x2 = max(b[2] for b in group)
+        y2 = max(b[3] for b in group)
+        conf = sum(b[4] for b in group) / len(group)
 
-# ================= DOWNLOAD / SAVE FUNCTIONS =================
-def download_direct_video(url: str):
-    """
-    Download ONLY direct video URLs (e.g. .mp4, .mov, etc.)
-    No YouTube support.
-    """
-    if is_youtube_url(url):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "YouTube URLs are no longer supported in this endpoint. "
-                "Please upload the video file directly or provide a direct video file URL."
-            )
-        )
+        return (x1, y1, x2, y2, conf)
 
-    # Optional early validation based on URL extension
-    if not has_valid_video_extension(url):
-        # We still allow download attempt because some valid URLs don't expose extension clearly
-        pass
+    result = []
+    for g in [group1, group2]:
+        m = merge(g)
+        if m:
+            result.append(m)
 
+    return result
+
+# ================= VIDEO =================
+def save_uploaded_video(file: UploadFile):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_path = tmp.name
+    path = tmp.name
 
-    try:
-        with requests.get(url, stream=True, timeout=60) as r:
-            if r.status_code != 200:
-                raise HTTPException(400, "Failed to download video")
+    while True:
+        chunk = file.file.read(1024 * 1024)
+        if not chunk:
+            break
+        tmp.write(chunk)
 
-            content_type = r.headers.get("Content-Type", "").lower()
-            if content_type and not content_type.startswith("video/"):
-                # Not all servers return perfect content-type, but this is a useful safeguard
-                # We'll still allow octet-stream because some file servers use it.
-                if "application/octet-stream" not in content_type:
-                    raise HTTPException(
-                        400,
-                        f"URL does not appear to be a direct video file (Content-Type: {content_type})"
-                    )
+    tmp.close()
+    file.file.close()
+    return path
 
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    tmp.write(chunk)
-
-        tmp.close()
-
-        if os.path.getsize(tmp_path) == 0:
-            raise HTTPException(400, "Downloaded video file is empty")
-
-        return tmp_path
-
-    except HTTPException:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
-    except Exception as e:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise HTTPException(400, f"Failed to download direct video: {str(e)}")
-
-
-def save_uploaded_video(upload_file: UploadFile):
-    """
-    Save uploaded video file to temp storage.
-    """
-    if upload_file is None:
-        raise HTTPException(400, "Video file is required")
-
-    filename = (upload_file.filename or "").lower()
-    ext = os.path.splitext(filename)[1]
-
-    if ext and ext not in ALLOWED_VIDEO_EXTENSIONS:
-        raise HTTPException(
-            400,
-            f"Unsupported video file extension: {ext}. Allowed: {sorted(ALLOWED_VIDEO_EXTENSIONS)}"
-        )
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext if ext else ".mp4")
-    tmp_path = tmp.name
-
-    try:
-        while True:
-            chunk = upload_file.file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp.write(chunk)
-
-        tmp.close()
-
-        if os.path.getsize(tmp_path) == 0:
-            raise HTTPException(400, "Uploaded video file is empty")
-
-        return tmp_path
-
-    except HTTPException:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
-    except Exception as e:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise HTTPException(400, f"Failed to save uploaded video: {str(e)}")
-    finally:
-        try:
-            upload_file.file.close()
-        except Exception:
-            pass
-
-
-# ================= FORCE CONVERT =================
 def convert_to_mp4(input_path):
-    output_path = input_path + "_fixed.mp4"
-
-    command = [
-        "ffmpeg",
-        "-i", input_path,
-        "-vcodec", "libx264",
-        "-acodec", "aac",
-        "-movflags", "+faststart",
-        "-y",
-        output_path
-    ]
+    output = input_path + "_fixed.mp4"
 
     subprocess.run(
-        command,
+        ["ffmpeg", "-i", input_path, "-vcodec", "libx264", "-acodec", "aac", "-y", output],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
 
-    if not os.path.exists(output_path):
-        raise HTTPException(400, "FFmpeg conversion failed")
+    return output
 
-    return output_path
-
-
-# ================= CORE PROCESS =================
-def process_frame_from_video(video_path):
-    """
-    Only read limited frames for CPU safety.
-    """
-
+def process_frame(video_path):
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise HTTPException(400, "OpenCV cannot open video")
+    ret, frame = cap.read()
+    cap.release()
 
-    start_time = time.time()
-    frame_count = 0
-    selected_frame = None
+    if not ret:
+        raise HTTPException(400, "No frame")
 
-    try:
-        while cap.isOpened():
-
-            if time.time() - start_time > MAX_VIDEO_SECONDS:
-                break
-
-            if frame_count >= MAX_FRAMES:
-                break
-
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            frame_count += 1
-
-            # Just take first valid frame for cleanliness check
-            selected_frame = frame
-            break
-
-    finally:
-        cap.release()
-
-    if selected_frame is None:
-        raise HTTPException(400, "No valid frame extracted")
-
-    return selected_frame
-
+    return frame
 
 # ================= ENDPOINT =================
 @app.post("/process-video")
-def process_video(
-    video_url: str = Form(None),
-    video_file: UploadFile = File(None)
-):
-    """
-    Process video from:
-    1. uploaded file (video_file), OR
-    2. direct video file URL (video_url)
+def process_video(video_file: UploadFile = File(...)):
 
-    NOTE:
-    - YouTube URLs are NOT supported.
-    - Output format remains unchanged.
-    """
-
-    if not video_url and not video_file:
-        raise HTTPException(
-            400,
-            "Either 'video_file' upload or 'video_url' direct video link is required"
-        )
-
-    if video_url and video_file:
-        raise HTTPException(
-            400,
-            "Please provide only one input: either 'video_file' or 'video_url', not both"
-        )
-
-    original_path = None
-    fixed_path = None
+    original_path = save_uploaded_video(video_file)
+    fixed_path = convert_to_mp4(original_path)
 
     try:
-        if video_file:
-            original_path = save_uploaded_video(video_file)
-        else:
-            original_path = download_direct_video(video_url)
+        frame = process_frame(fixed_path)
+        h, w = frame.shape[:2]
+        frame_area = w * h
 
-        fixed_path = convert_to_mp4(original_path)
-        frame = process_frame_from_video(fixed_path)
-
-        # ===== THREAD-SAFE YOLO INFERENCE =====
+        # ===== YOLO =====
         with model_lock:
             results = model.predict(
                 frame,
-                conf=CONF_THRESHOLD,
+                conf=BASE_CONF,
                 nms=False,
                 max_det=300,
                 verbose=False
             )
 
         boxes = results[0].boxes
-        dirty_detected = False
-        detections = []
+
+        # ===== FILTER ADAPTIF 🔥 =====
+        filtered_boxes = []
 
         if boxes is not None:
             for box in boxes:
-                cls_id = int(box.cls[0])
-                cls_name = model.names[cls_id].lower()
+                cls_name = model.names[int(box.cls[0])].lower()
                 conf = float(box.conf[0])
+
+                if cls_name not in DIRTY_CLASSES:
+                    continue
+
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                is_dirty = cls_name in DIRTY_CLASSES
-                color = (0, 0, 255) if is_dirty else (0, 255, 0)
+                area = (x2 - x1) * (y2 - y1)
+                ratio = area / frame_area
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    frame,
-                    f"{cls_name} {conf:.2f}",
-                    (x1, max(20, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2
-                )
+                threshold = LARGE_CONF if ratio >= AREA_THRESHOLD else SMALL_CONF
 
-                detections.append({
-                    "class": cls_name,
-                    "confidence": conf,
-                    "bbox": [x1, y1, x2, y2],
-                    "is_dirty": is_dirty
-                })
+                if conf >= threshold:
+                    filtered_boxes.append((x1, y1, x2, y2, conf))
 
-                if is_dirty:
-                    dirty_detected = True
+        # ===== CLUSTER =====
+        merged_boxes = cluster_to_two_boxes(filtered_boxes)
 
+        detections = []
+        dirty_detected = len(merged_boxes) > 0
+
+        # ===== DRAW =====
+        for (x1, y1, x2, y2, conf) in merged_boxes:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+
+            cv2.putText(
+                frame,
+                f"Dirty {conf:.2f}",
+                (x1, max(20, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
+
+            detections.append({
+                "class": "dirty_area",
+                "confidence": conf,
+                "bbox": [x1, y1, x2, y2],
+                "is_dirty": True
+            })
+
+        # ===== STATUS =====
         status = "Dirty" if dirty_detected else "Clean"
+
+        cv2.putText(
+            frame,
+            f"STATUS: {status}",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255) if dirty_detected else (0, 255, 0),
+            3
+        )
 
         frame = resize_fit(frame)
         _, buffer = cv2.imencode(".jpg", frame)
@@ -361,9 +219,5 @@ def process_video(
         }
 
     finally:
-        # Cleanup files
-        if original_path and os.path.exists(original_path):
-            os.remove(original_path)
-
-        if fixed_path and os.path.exists(fixed_path):
-            os.remove(fixed_path)
+        os.remove(original_path)
+        os.remove(fixed_path)
