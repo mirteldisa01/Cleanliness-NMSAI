@@ -15,7 +15,8 @@ MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download
 
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 
-CONF_THRESHOLD = 0.1   # ✅ SAMA DENGAN COLAB
+CONF_THRESHOLD = 0.1
+IOU_THRESHOLD = 0.5   # kontrol overlap
 MAX_DET = 300
 FRAME_SKIP = 90
 FPS = 30
@@ -40,6 +41,49 @@ def load_model_once():
     model = YOLO(MODEL_PATH)
     print("Model loaded")
 
+
+# ================= IOU =================
+def compute_iou(box1, box2):
+    x1, y1, x2, y2, _ = box1
+    x1g, y1g, x2g, y2g, _ = box2
+
+    xi1 = max(x1, x1g)
+    yi1 = max(y1, y1g)
+    xi2 = min(x2, x2g)
+    yi2 = min(y2, y2g)
+
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+
+    box1_area = (x2 - x1) * (y2 - y1)
+    box2_area = (x2g - x1g) * (y2g - y1g)
+
+    union_area = box1_area + box2_area - inter_area
+
+    return inter_area / union_area if union_area > 0 else 0
+
+
+# ================= NMS MANUAL =================
+def non_max_suppression(boxes, iou_threshold=0.5):
+    if not boxes:
+        return []
+
+    # sort by confidence DESC
+    boxes = sorted(boxes, key=lambda x: x[4], reverse=True)
+
+    selected = []
+
+    while boxes:
+        best = boxes.pop(0)
+        selected.append(best)
+
+        boxes = [
+            box for box in boxes
+            if compute_iou(best, box) < iou_threshold
+        ]
+
+    return selected
+
+
 # ================= RESIZE =================
 def resize_fit(frame):
     h, w = frame.shape[:2]
@@ -55,37 +99,6 @@ def resize_fit(frame):
     canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
     return canvas
 
-# ================= CLUSTER =================
-def cluster_to_two_boxes(boxes):
-    if len(boxes) == 0:
-        return []
-
-    centers = [(b[0] + b[2]) // 2 for b in boxes]
-    threshold = np.median(centers)
-
-    group1 = [boxes[i] for i in range(len(boxes)) if centers[i] < threshold]
-    group2 = [boxes[i] for i in range(len(boxes)) if centers[i] >= threshold]
-
-    def merge(group):
-        if len(group) == 0:
-            return None
-
-        x1 = min(b[0] for b in group)
-        y1 = min(b[1] for b in group)
-        x2 = max(b[2] for b in group)
-        y2 = max(b[3] for b in group)
-        conf = sum(b[4] for b in group) / len(group)
-
-        return (x1, y1, x2, y2, conf)
-
-    result = []
-
-    for g in [group1, group2]:
-        m = merge(g)
-        if m:
-            result.append(m)
-
-    return result
 
 # ================= VIDEO HANDLER =================
 def save_uploaded_video(file: UploadFile):
@@ -102,6 +115,7 @@ def save_uploaded_video(file: UploadFile):
     file.file.close()
     return path
 
+
 def download_video_from_url(url: str):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     path = tmp.name
@@ -117,6 +131,7 @@ def download_video_from_url(url: str):
     tmp.close()
     return path
 
+
 def convert_to_mp4(input_path):
     output = input_path + "_fixed.mp4"
 
@@ -128,7 +143,8 @@ def convert_to_mp4(input_path):
 
     return output
 
-# ================= FRAME EXTRACTION (IDENTIK COLAB) =================
+
+# ================= FRAME EXTRACTION =================
 def process_frame(video_path):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     tmp.close()
@@ -155,6 +171,7 @@ def process_frame(video_path):
 
     return frame
 
+
 # ================= ENDPOINT =================
 @app.post("/process-video")
 def process_video(
@@ -174,7 +191,7 @@ def process_video(
     try:
         frame = process_frame(fixed_path)
 
-        # ===== YOLO (SAMA COLAB) =====
+        # ===== YOLO =====
         with model_lock:
             results = model.predict(
                 frame,
@@ -186,7 +203,7 @@ def process_video(
 
         boxes = results[0].boxes
 
-        # ===== FILTER DIRTY (IDENTIK COLAB) =====
+        # ===== FILTER DIRTY =====
         filtered_boxes = []
 
         if boxes is not None:
@@ -198,14 +215,14 @@ def process_video(
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     filtered_boxes.append((x1, y1, x2, y2, conf))
 
-        # ===== CLUSTER =====
-        merged_boxes = cluster_to_two_boxes(filtered_boxes)
+        # ===== APPLY NMS (NO OVERLAP) =====
+        final_boxes = non_max_suppression(filtered_boxes, IOU_THRESHOLD)
 
+        # ===== OUTPUT =====
         detections = []
-        dirty_detected = len(merged_boxes) > 0
+        dirty_detected = len(final_boxes) > 0
 
-        # ===== DRAW =====
-        for (x1, y1, x2, y2, conf) in merged_boxes:
+        for (x1, y1, x2, y2, conf) in final_boxes:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
             cv2.putText(
@@ -238,7 +255,7 @@ def process_video(
             3
         )
 
-        # ===== OUTPUT =====
+        # ===== FINAL OUTPUT =====
         frame = resize_fit(frame)
         _, buffer = cv2.imencode(".jpg", frame)
         img_base64 = base64.b64encode(buffer).decode("utf-8")
