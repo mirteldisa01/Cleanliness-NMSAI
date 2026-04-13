@@ -24,7 +24,10 @@ FPS = 30
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
 
-app = FastAPI(title="Cleanliness Detection API")
+app = FastAPI(
+    title="Cleanliness Detection API",
+    version="1.2.0"
+)
 
 model = None
 model_lock = threading.Lock()
