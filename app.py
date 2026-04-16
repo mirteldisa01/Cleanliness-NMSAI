@@ -230,15 +230,15 @@ def process_video(
         for (x1, y1, x2, y2, conf) in final_boxes:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-            cv2.putText(
-                frame,
-                f"Dirty {conf:.2f}",
-                (x1, max(20, y1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
-            )
+            #cv2.putText(
+            #    frame,
+            #    f"Dirty {conf:.2f}",
+            #    (x1, max(20, y1 - 10)),
+            #    cv2.FONT_HERSHEY_SIMPLEX,
+            #    0.7,
+            #    (0, 0, 255),
+            #    2
+            #)
 
             detections.append({
                 "class": "dirty_area",
