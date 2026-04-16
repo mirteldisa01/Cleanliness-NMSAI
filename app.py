@@ -16,7 +16,7 @@ MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 
 CONF_THRESHOLD = 0.1
-IOU_THRESHOLD = 0.5   # kontrol overlap
+IOU_THRESHOLD = 0.5
 MAX_DET = 300
 FRAME_SKIP = 90
 FPS = 30
@@ -65,12 +65,11 @@ def compute_iou(box1, box2):
     return inter_area / union_area if union_area > 0 else 0
 
 
-# ================= NMS MANUAL =================
+# ================= NMS =================
 def non_max_suppression(boxes, iou_threshold=0.5):
     if not boxes:
         return []
 
-    # sort by confidence DESC
     boxes = sorted(boxes, key=lambda x: x[4], reverse=True)
 
     selected = []
@@ -194,6 +193,9 @@ def process_video(
     try:
         frame = process_frame(fixed_path)
 
+        # ===== SAVE LAST FRAME (FOR FALLBACK) =====
+        last_frame = frame.copy()
+
         # ===== YOLO =====
         with model_lock:
             results = model.predict(
@@ -218,7 +220,7 @@ def process_video(
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     filtered_boxes.append((x1, y1, x2, y2, conf))
 
-        # ===== APPLY NMS (NO OVERLAP) =====
+        # ===== APPLY NMS =====
         final_boxes = non_max_suppression(filtered_boxes, IOU_THRESHOLD)
 
         # ===== OUTPUT =====
@@ -257,6 +259,24 @@ def process_video(
             (0, 0, 255) if dirty_detected else (0, 255, 0),
             3
         )
+
+        # ===== FALLBACK: NO DIRTY DETECTED =====
+        if not dirty_detected and last_frame is not None:
+            fallback_frame = last_frame.copy()
+
+            h, w = fallback_frame.shape[:2]
+
+            cv2.putText(
+                fallback_frame,
+                "CLEAR",
+                (w - 200, 40),  # kanan atas
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 255, 0),  # hijau
+                3
+            )
+
+            frame = fallback_frame
 
         # ===== FINAL OUTPUT =====
         frame = resize_fit(frame)
