@@ -15,7 +15,7 @@ MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download
 
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 
-CONF_THRESHOLD = 0.1
+CONF_THRESHOLD = 0.29
 IOU_THRESHOLD = 0.5
 MAX_DET = 300
 FRAME_SKIP = 90
