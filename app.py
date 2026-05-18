@@ -11,13 +11,18 @@ import threading
 
 # ================= CONFIG =================
 MODEL_PATH = "cleanliness-11x-100.pt"
-MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download/v1.2.0/cleanliness-11x-100.pt"
+MODEL_URL = "https://github.com/mirteldisa01/cleanliness-nmsai/releases/download/v1.3.0/cleanliness-11x-100-texture.pt"
 
+# class yang dianggap DIRTY
 DIRTY_CLASSES = {"dryleaves", "grass", "tree"}
 
-CONF_THRESHOLD = 0.29
+# class yang dianggap CLEAN
+CLEAN_CLASSES = {"ground"}
+
+CONF_THRESHOLD = 0.15
 IOU_THRESHOLD = 0.5
 MAX_DET = 300
+
 FRAME_SKIP = 90
 FPS = 30
 
@@ -43,6 +48,7 @@ def load_model_once():
 
     model = YOLO(MODEL_PATH)
     print("Model loaded")
+    print("Classes:", model.names)
 
 
 # ================= IOU =================
@@ -86,6 +92,69 @@ def non_max_suppression(boxes, iou_threshold=0.5):
     return selected
 
 
+# ================= CLUSTER =================
+def cluster_to_two_boxes(boxes):
+    if boxes is None or len(boxes) == 0:
+        return []
+
+    centers = []
+    coords = []
+    confs = []
+
+    for box in boxes:
+        x1, y1, x2, y2, conf = box
+
+        cx = (x1 + x2) // 2
+
+        centers.append(cx)
+        coords.append((x1, y1, x2, y2))
+        confs.append(conf)
+
+    centers = np.array(centers)
+
+    threshold = np.median(centers)
+
+    group1 = []
+    group2 = []
+
+    for i, cx in enumerate(centers):
+        item = (coords[i], confs[i])
+
+        if cx < threshold:
+            group1.append(item)
+        else:
+            group2.append(item)
+
+    def merge(group):
+        if len(group) == 0:
+            return None
+
+        boxes_only = [g[0] for g in group]
+        confs_only = [g[1] for g in group]
+
+        x1 = min([b[0] for b in boxes_only])
+        y1 = min([b[1] for b in boxes_only])
+        x2 = max([b[2] for b in boxes_only])
+        y2 = max([b[3] for b in boxes_only])
+
+        avg_conf = sum(confs_only) / len(confs_only)
+
+        return (x1, y1, x2, y2, avg_conf)
+
+    result = []
+
+    m1 = merge(group1)
+    m2 = merge(group2)
+
+    if m1:
+        result.append(m1)
+
+    if m2:
+        result.append(m2)
+
+    return result
+
+
 # ================= RESIZE =================
 def resize_fit(frame):
     h, w = frame.shape[:2]
@@ -95,10 +164,12 @@ def resize_fit(frame):
     resized = cv2.resize(frame, (new_w, new_h))
 
     canvas = np.zeros((TARGET_HEIGHT, TARGET_WIDTH, 3), dtype=np.uint8)
+
     x_offset = (TARGET_WIDTH - new_w) // 2
     y_offset = (TARGET_HEIGHT - new_h) // 2
 
     canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+
     return canvas
 
 
@@ -109,12 +180,15 @@ def save_uploaded_video(file: UploadFile):
 
     while True:
         chunk = file.file.read(1024 * 1024)
+
         if not chunk:
             break
+
         tmp.write(chunk)
 
     tmp.close()
     file.file.close()
+
     return path
 
 
@@ -123,6 +197,7 @@ def download_video_from_url(url: str):
     path = tmp.name
 
     r = requests.get(url, stream=True)
+
     if r.status_code != 200:
         raise HTTPException(400, "Failed to download video")
 
@@ -131,6 +206,7 @@ def download_video_from_url(url: str):
             tmp.write(chunk)
 
     tmp.close()
+
     return path
 
 
@@ -138,7 +214,17 @@ def convert_to_mp4(input_path):
     output = input_path + "_fixed.mp4"
 
     subprocess.run(
-        ["ffmpeg", "-i", input_path, "-vcodec", "libx264", "-acodec", "aac", "-y", output],
+        [
+            "ffmpeg",
+            "-i",
+            input_path,
+            "-vcodec",
+            "libx264",
+            "-acodec",
+            "aac",
+            "-y",
+            output
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -163,9 +249,14 @@ def process_frame(video_path):
         tmp.name
     ]
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
     frame = cv2.imread(tmp.name)
+
     os.remove(tmp.name)
 
     if frame is None:
@@ -193,7 +284,7 @@ def process_video(
     try:
         frame = process_frame(fixed_path)
 
-        # ===== SAVE LAST FRAME (FOR FALLBACK) =====
+        # ===== SAVE LAST FRAME =====
         last_frame = frame.copy()
 
         # ===== YOLO =====
@@ -208,27 +299,64 @@ def process_video(
 
         boxes = results[0].boxes
 
-        # ===== FILTER DIRTY =====
-        filtered_boxes = []
+        # ===== FILTER =====
+        dirty_boxes = []
 
-        if boxes is not None:
+        ground_detected = False
+        any_detection = False
+
+        if boxes is not None and len(boxes) > 0:
+
+            any_detection = True
+
             for box in boxes:
-                cls_name = model.names[int(box.cls[0])].lower()
+                cls_id = int(box.cls[0])
+                cls_name = model.names[cls_id].lower()
                 conf = float(box.conf[0])
 
-                if cls_name in DIRTY_CLASSES and conf >= CONF_THRESHOLD:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    filtered_boxes.append((x1, y1, x2, y2, conf))
+                print(f"Detected: {cls_name} | conf: {conf:.4f}")
 
-        # ===== APPLY NMS =====
-        final_boxes = non_max_suppression(filtered_boxes, IOU_THRESHOLD)
+                # ===== DIRTY =====
+                if cls_name in DIRTY_CLASSES:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                    dirty_boxes.append(
+                        (x1, y1, x2, y2, conf)
+                    )
+
+                # ===== CLEAN =====
+                if cls_name in CLEAN_CLASSES:
+                    ground_detected = True
+
+        print("\nJumlah dirty boxes:", len(dirty_boxes))
+
+        # ===== OPTIONAL NMS =====
+        dirty_boxes = non_max_suppression(
+            dirty_boxes,
+            IOU_THRESHOLD
+        )
+
+        # ===== CLUSTER =====
+        merged_boxes = cluster_to_two_boxes(dirty_boxes)
+
+        print("Jumlah merged boxes:", len(merged_boxes))
 
         # ===== OUTPUT =====
         detections = []
-        dirty_detected = len(final_boxes) > 0
 
-        for (x1, y1, x2, y2, conf) in final_boxes:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        dirty_detected = len(merged_boxes) > 0
+
+        for i, (x1, y1, x2, y2, conf) in enumerate(merged_boxes):
+
+            print(f"Cluster {i+1} -> Confidence: {conf:.4f}")
+
+            cv2.rectangle(
+                frame,
+                (x1, y1),
+                (x2, y2),
+                (0, 0, 255),
+                3
+            )
 
             #cv2.putText(
             #    frame,
@@ -247,21 +375,42 @@ def process_video(
                 "is_dirty": True
             })
 
-        # ===== STATUS =====
-        status = "Dirty" if dirty_detected else "Clean"
+        # ================= STATUS LOGIC =================
+        """
+        RULE:
+        1. Jika ada dirty -> DIRTY
+        2. Jika ada ground -> CLEAN
+        3. Jika tidak ada detection sama sekali -> CLEAN
+        """
 
+        if dirty_detected:
+            status = "Dirty"
+
+        elif ground_detected:
+            status = "Clean"
+
+        elif not any_detection:
+            status = "Clean"
+
+        else:
+            status = "Clean"
+
+        # ===== STATUS DRAW =====
         cv2.putText(
             frame,
             f"STATUS: {status}",
             (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
-            (0, 0, 255) if dirty_detected else (0, 255, 0),
+            (0, 0, 255) if status == "Dirty" else (0, 255, 0),
             3
         )
 
+        print("\nSTATUS:", status)
+
         # ===== FALLBACK: NO DIRTY DETECTED =====
         if not dirty_detected and last_frame is not None:
+
             fallback_frame = last_frame.copy()
 
             h, w = fallback_frame.shape[:2]
@@ -269,10 +418,10 @@ def process_video(
             cv2.putText(
                 fallback_frame,
                 "CLEAR",
-                (w - 200, 40),  # kanan atas
+                (w - 200, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.2,
-                (0, 255, 0),  # hijau
+                (0, 255, 0),
                 3
             )
 
@@ -280,7 +429,9 @@ def process_video(
 
         # ===== FINAL OUTPUT =====
         frame = resize_fit(frame)
+
         _, buffer = cv2.imencode(".jpg", frame)
+
         img_base64 = base64.b64encode(buffer).decode("utf-8")
 
         return {
@@ -291,5 +442,8 @@ def process_video(
         }
 
     finally:
-        os.remove(original_path)
-        os.remove(fixed_path)
+        if os.path.exists(original_path):
+            os.remove(original_path)
+
+        if os.path.exists(fixed_path):
+            os.remove(fixed_path)
