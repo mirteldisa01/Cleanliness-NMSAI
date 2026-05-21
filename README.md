@@ -92,6 +92,8 @@ Model File:
 
 `cleanliness-11x-100-texture.pt`
 
+This release updates the official production model weight used for inference and includes expanded training data for textured ground detection scenarios.
+
 The application automatically downloads the model at startup if it is not present locally.
 
 ---
@@ -287,6 +289,19 @@ Second model upgrade release including:
 - Added dirty-area clustering
 - Improved inference quality
 - Maintained API compatibility
+
+### v1.3.0
+
+Third model upgrade release including:
+
+- Improved ground cleanliness detection on complex and non-uniform textures
+- Enhanced model robustness for real-world environmental conditions
+- Improved detection consistency compared to previous model versions
+- Maintained compatibility with the existing inference pipeline
+
+Model Asset:
+
+`cleanliness-11x-100-texture.pt`
 
 ---
 
