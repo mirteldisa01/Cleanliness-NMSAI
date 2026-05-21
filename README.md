@@ -86,7 +86,7 @@ The production model is distributed via GitHub Release.
 
 Version:
 
-`v1.2.0`
+`v1.3.0`
 
 Model File:
 
