@@ -77,29 +77,6 @@ Detection rules:
 
 Dirty detections are grouped into at most two larger regions using center-based clustering to reduce excessive overlapping boxes and simplify visualization.
 
----
-
-## System Workflow
-
-```text
-Video Input
-     ↓
-Video Normalization (FFmpeg)
-     ↓
-Frame Extraction
-     ↓
-YOLO Inference
-     ↓
-Detection Filtering
-     ↓
-Dirty/Clean Classification
-     ↓
-Dirty Area Clustering
-     ↓
-Status Decision
-     ↓
-Annotated Output + JSON Response
-```
 
 ---
 
@@ -113,7 +90,7 @@ Version:
 
 Model File:
 
-`cleanliness-11x-100.pt`
+`cleanliness-11x-100-texture.pt`
 
 The application automatically downloads the model at startup if it is not present locally.
 
